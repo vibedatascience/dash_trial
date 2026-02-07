@@ -20,6 +20,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 from dash.paths import TABLES_DIR, BUSINESS_DIR
+from dash.r_interpreter import RInterpreter, R_TOOLS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -369,6 +370,46 @@ The chart is returned as a base64-encoded image.""",
             "properties": {},
             "required": []
         }
+    },
+    {
+        "name": "create_d3_chart",
+        "description": """Create an interactive D3.js chart. ONLY use when user explicitly asks for D3 or interactive charts.
+
+First fetch data using run_sql or run_code and store in a variable (e.g., df).
+Then call this tool with D3.js code that uses the 'data' variable.
+
+The 'data' variable will be automatically injected as an array of objects.
+For example, if df has columns ['year', 'value'], data will be:
+[{year: 1950, value: 45}, {year: 1960, value: 52}, ...]
+
+Your D3 code should:
+- Select '#chart' as the container
+- Use the 'data' variable directly
+- Set explicit width/height (e.g., 800x500)
+
+Example:
+```javascript
+const width = 800, height = 500;
+const svg = d3.select('#chart').append('svg').attr('width', width).attr('height', height);
+const x = d3.scaleLinear().domain(d3.extent(data, d => d.year)).range([50, width-20]);
+const y = d3.scaleLinear().domain([0, d3.max(data, d => d.value)]).range([height-30, 20]);
+svg.selectAll('circle').data(data).join('circle')
+   .attr('cx', d => x(d.year)).attr('cy', d => y(d.value)).attr('r', 5);
+```""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "D3.js code. The 'data' variable contains the data as array of objects."
+                },
+                "data_variable": {
+                    "type": "string",
+                    "description": "Name of the Python variable containing the DataFrame to use (e.g., 'df')"
+                }
+            },
+            "required": ["code", "data_variable"]
+        }
     }
 ]
 
@@ -382,151 +423,90 @@ def build_system_prompt() -> str:
     semantic_model = format_semantic_model()
     business_context = format_business_context()
 
-    return f"""You are Dash, a self-learning data agent that provides **insights**, not just query results.
+    return f"""You are Dash, an AI data analyst. Your job is to analyze data, create charts, and provide insights.
 
-## Your Purpose
+## What You Do
 
-You are the user's data analyst — one that never forgets, never repeats mistakes,
-and gets smarter with every query.
+You help users with ANY data task:
+- Fetch data from URLs (CSV, JSON, APIs)
+- Parse and analyze text/data the user pastes
+- Create visualizations and charts
+- Run statistical analysis
+- Answer questions about data
 
-You don't just fetch data. You interpret it, contextualize it, and explain what it means.
-You remember the gotchas, the type mismatches, the date formats that tripped you up before.
+**Do whatever the user asks.** Don't assume they want SQL — most users will give you URLs, paste data, or ask general questions.
 
-Your goal: make the user look like they've been working with this data for years.
+## Data Sources (in order of likelihood)
 
-## Insights, Not Just Data
+1. **URLs** - User gives you a CSV/JSON URL → use `pd.read_csv(url)` or `pd.read_json(url)`
+2. **Pasted data** - User pastes text/CSV → parse it with pandas
+3. **Web scraping** - User wants data from a webpage → use requests + pandas
+4. **Pre-loaded PostgreSQL** - ONLY if user explicitly asks about "the database" or "tables" (F1 racing data is loaded for demo)
 
-| Bad | Good |
-|-----|------|
-| "Hamilton: 11 wins" | "Hamilton won 11 of 21 races (52%) — 7 more than Bottas" |
-| "Schumacher: 7 titles" | "Schumacher's 7 titles stood for 15 years until Hamilton matched it" |
+## Tools
 
-## SQL Rules
+### Python (default):
+- `run_code` - Execute Python. Pre-loaded: pandas, numpy, requests
+- `run_code_and_get_chart` - Create matplotlib charts
+- `run_sql` - Query PostgreSQL (ONLY when user asks for database/tables)
+- `list_variables` - See what's in memory
 
-- LIMIT 50 by default
-- Never SELECT * — specify columns
-- ORDER BY for top-N queries
-- No DROP, DELETE, UPDATE, INSERT
+### R (when user prefers R or asks for tidyverse/ggplot2):
+- `run_r_code` - Execute R code. Pre-loaded: **tidyverse** (dplyr, tidyr, readr, ggplot2)
+- `run_r_chart` - Create ggplot2 visualizations (dark theme auto-applied)
+- Use tidyverse idioms: pipes (`%>%`), `mutate()`, `filter()`, `group_by()`, `summarize()`
+- For charts: always use ggplot2 with `aes()`, `geom_*()`, proper labels
 
-## Code Interpreter & Visualizations
+## Examples
 
-You have a Python code interpreter that works like Jupyter notebook cells:
-- **Variables persist across calls** - DataFrames, lists, etc. stay in memory
-- Use `run_code` for data manipulation, `run_code_and_get_chart` for visualizations
-- Use `list_variables` to see what's already in memory
-- **NEVER re-fetch data that's already loaded** - reuse existing variables!
+User: "Analyze this CSV: https://example.com/data.csv"
+→ Use `pd.read_csv('https://example.com/data.csv')`
 
-### CRITICAL: Explain Before and After Running Code
-**NEVER run multiple code cells in a row without explaining what you're doing!**
-- BEFORE each code execution: Explain what you're about to do and why
-- AFTER each code/chart execution: Summarize findings and insights
-- The user can't see code output in the same way you can - they need your interpretation
-- Maximum 2-3 code cells before providing a written explanation
+User: "Here's my sales data: [pastes CSV]"
+→ Parse it with `pd.read_csv(io.StringIO('''...'''))`
 
-### Workflow (like Jupyter):
-1. First call: `df = query_db("SELECT ...")` - fetches and stores data
-2. Later calls: Just use `df` directly - it's still in memory!
-3. Use `list_variables` if unsure what's available
+User: "What tables are in the database?"
+→ NOW use `run_sql` to query the PostgreSQL
 
-### Example (multi-step like Jupyter cells):
-```python
-# Cell 1: Fetch data (only do this ONCE)
-hamilton_df = query_db("SELECT year, points FROM drivers_championship WHERE name = 'Lewis Hamilton' ORDER BY year")
-```
+## Guidelines
 
-```python
-# Cell 2: Create chart (reuses hamilton_df from memory)
-plt.figure(figsize=(12, 6))
-plt.bar(hamilton_df['year'], hamilton_df['points'], color='#00D2BE')
-plt.title('Lewis Hamilton - Points by Season', fontsize=14)
-plt.xlabel('Year')
-plt.ylabel('Points')
-```
+- **Never use emojis**
+- Variables persist across calls (like Jupyter)
+- ONE chart per response unless asked for more
+- Always explain insights, not just raw numbers
 
-### When to create charts:
-- User asks for a "graph", "chart", "plot", or "visualization"
-- Comparing multiple drivers/teams over time
-- Showing trends, distributions, or rankings visually
-- User says "show me" data
+## Chart Aesthetics (IMPORTANT)
 
-### IMPORTANT: After creating any chart, ALWAYS:
-1. Provide a brief description of what the chart shows (axes, data, time range)
-2. Explain 2-3 key insights visible in the chart
-3. This ensures the user understands the chart and you can reference it in follow-up questions
-4. **Remember**: Chat history doesn't include images, so if the user asks about "the chart", use `list_variables` to see what data you used and recall what you plotted
+**NEVER use default colors.** Every chart must have a cohesive, intentional color scheme tied to the data's subject matter.
 
-## Chart Style Guide (CRITICAL - FOLLOW EXACTLY)
+### ONE CHART ONLY
+**Create exactly ONE chart per response.** Do NOT create subplots, multi-panel figures, or "4 charts in 1" unless the user explicitly asks for multiple charts or a comparison grid. When in doubt, pick the single most insightful visualization.
 
-### SIZE & LAYOUT
-- **CREATE BIG GRAPHS** - use figsize=(14, 8) minimum, (16, 10) for complex charts
-- **DO NOT create multiple graphs in one row** unless user specifically requests it
-- **Small text for labels** to prevent overlap - use fontsize 8-10 for tick labels
-- If labels overlap, rotate them 45° or use smaller font
+### Color Philosophy:
+- **Match the domain**: Brazil soccer data → green (#009c3b) and yellow (#ffdf00). Ferrari data → red (#dc0000). Ocean/marine data → deep blues and teals.
+- **Avoid clichés**: NO purple gradients on white. NO rainbow palettes. NO generic blue-orange.
+- **Use white or light backgrounds by default** - clean, professional look. Only use dark backgrounds (#1e293b) if it fits the data theme (e.g., space data, nightlife).
+- **Limit palette**: 2-4 colors max. Every color must have a reason.
 
-### COLOR PALETTE (use in this order)
-Primary colors:
-- Econ Red: '#E3120B'
-- Blue1: '#006BA2'
-- Blue2: '#3EBCD2'
-- Green: '#379A8B'
-- Yellow: '#EBB434'
-- Olive: '#B4BA39'
-- Purple: '#9A607F'
-- Gold: '#D1B07C'
-- Grey: '#758D99'
+### Examples:
+| Data Subject | Primary Colors | Background |
+|--------------|----------------|------------|
+| Financial/Banking | Navy (#1e3a5f), Gold (#d4af37) | White |
+| Healthcare | Teal (#0d9488), Soft blue (#7dd3fc) | White/light gray |
+| Sports team | Use ACTUAL team colors | White |
+| Environmental | Forest green (#166534), Earth brown (#78350f) | Light cream |
+| Tech/SaaS | Electric blue (#3b82f6), Slate (#334155) | White |
 
-Dark variants for contrast:
-- Dark Red: '#A81829', Dark Blue1: '#00588D', Dark Blue2: '#005F73'
-- Dark Green: '#005F52', Dark Yellow: '#714C00', Dark Olive: '#4C5900'
-- Dark Purple: '#78405F', Dark Gold: '#674E1F', Dark Grey: '#3F5661'
-
-### COLOR RULES
-- Use grey ('#758D99') for 'other'/'unknown' categories
-- For time series, use light-to-dark progression
-- Use 50% alpha for secondary elements, 100% for highlights
-
-### TYPOGRAPHY
-- Clean sans-serif fonts (matplotlib default is fine)
-- **Headlines/titles: bold, fontsize 16-18**
-- **Axis labels: regular, fontsize 12-14**
-- **Tick labels: fontsize 8-10** (small to avoid overlap)
-- Source/footnotes: fontsize 8, color='#758D99'
-
-### CHART ELEMENTS
-- Background: white ('#FFFFFF')
-- Grid: light grey at 25% opacity, linewidth 0.4
-- Zero baseline: black, linewidth 1.0
-- Minimal tick marks, avoid crowding
-- Always use plt.tight_layout() to prevent clipping
-
-### EXAMPLE SETUP
-```python
-plt.figure(figsize=(14, 8))
-plt.rcParams['font.size'] = 10
-# ... your plot code ...
-plt.title('Title Here', fontsize=16, fontweight='bold')
-plt.xlabel('X Label', fontsize=12)
-plt.ylabel('Y Label', fontsize=12)
-plt.xticks(fontsize=9, rotation=45 if many_labels else 0)
-plt.yticks(fontsize=9)
-plt.grid(axis='y', alpha=0.3, linewidth=0.4)
-plt.tight_layout()
-```
-
-### AVOID
-- Label overlap (rotate or use smaller font)
-- Excessive grid lines
-- More than 6 colors without grouping
-- Crowded/unclear labeling
-- Decorative elements (chartjunk)
+### Implementation:
+- Python: Use `plt.figure(facecolor='white')` and `ax.set_facecolor('white')` by default
+- R/ggplot2: Use `theme(panel.background = element_rect(fill = 'white'))`
+- Only deviate from white background when thematically appropriate
 
 ---
 
-## SEMANTIC MODEL
+## DATABASE SCHEMA (only use if user asks about "database" or "tables")
 
 {semantic_model}
----
-
 {business_context}"""
 
 
@@ -553,8 +533,12 @@ class DashAgent:
         self.max_tokens = max_tokens
         self.system_prompt = build_system_prompt()
 
-        # Initialize code interpreter with DB connection
+        # Initialize code interpreters with DB connection
         self.interpreter = CodeInterpreter(db_url)
+        self.r_interpreter = RInterpreter(db_url)
+
+        # Combined tools list (Python + R)
+        self._tools = TOOLS + R_TOOLS
 
         # Conversation history: list of {"role": "user"|"assistant", "content": ...}
         self.messages: list[dict[str, Any]] = []
@@ -591,6 +575,41 @@ class DashAgent:
             elif tool_name == "list_variables":
                 return self.interpreter.list_variables()
 
+            elif tool_name == "create_d3_chart":
+                code = tool_input.get("code", "")
+                data_variable = tool_input.get("data_variable", "")
+
+                # Get the data from the interpreter's globals
+                if data_variable not in self.interpreter._globals:
+                    return f"Error: Variable '{data_variable}' not found. Available: {list(self.interpreter._globals.keys())}"
+
+                data = self.interpreter._globals[data_variable]
+
+                # Convert to JSON-serializable format
+                if hasattr(data, 'to_dict'):
+                    # It's a DataFrame
+                    json_data = data.to_dict(orient='records')
+                elif isinstance(data, list):
+                    json_data = data
+                else:
+                    return f"Error: Variable '{data_variable}' is not a DataFrame or list"
+
+                # Return D3 chart marker with code and data
+                chart_payload = json.dumps({"code": code, "data": json_data})
+                return f"[D3_CHART]{chart_payload}[/D3_CHART]"
+
+            # R tools
+            elif tool_name == "run_r_code":
+                code = tool_input.get("code", "")
+                return self.r_interpreter.run_code(code)
+
+            elif tool_name == "run_r_chart":
+                code = tool_input.get("code", "")
+                return self.r_interpreter.run_code_and_get_chart(code)
+
+            elif tool_name == "list_r_variables":
+                return self.r_interpreter.list_variables()
+
             else:
                 return f"Error: Unknown tool '{tool_name}'"
 
@@ -624,7 +643,7 @@ class DashAgent:
                 model=self.model,
                 max_tokens=self.max_tokens,
                 system=self.system_prompt,
-                tools=TOOLS,
+                tools=self._tools,
                 messages=self.messages,
             ) as stream_response:
                 # Stream content as it arrives
@@ -736,6 +755,44 @@ class DashAgent:
     def clear_history(self):
         """Clear conversation history."""
         self.messages = []
+
+    def restore_history(self, frontend_messages: list[dict[str, Any]]):
+        """Restore conversation history from frontend-format messages.
+
+        Converts the frontend event-based format to simplified text messages
+        so Claude has conversational context when resuming a conversation.
+        Tool calls are included as text summaries with their results.
+        """
+        self.messages = []
+        for msg in frontend_messages:
+            if msg.get("role") == "user":
+                self.messages.append({"role": "user", "content": msg.get("content", "")})
+            elif msg.get("role") == "assistant":
+                parts = []
+                for event in (msg.get("events") or []):
+                    if event.get("type") == "tool" and event.get("tool"):
+                        tool = event["tool"]
+                        name = tool.get("name", "unknown")
+                        args = tool.get("args", {})
+                        code_or_query = args.get("query") or args.get("code") or ""
+                        if code_or_query:
+                            parts.append(f"[Executed {name}]:\n{code_or_query}")
+                        else:
+                            parts.append(f"[Executed {name}]")
+                        result = str(tool.get("result", ""))
+                        if result and "[CHART_BASE64]" not in result and "[D3_CHART]" not in result:
+                            truncated = result[:500]
+                            if len(result) > 500:
+                                truncated += "... (truncated)"
+                            parts.append(f"Result: {truncated}")
+                        elif "[CHART_BASE64]" in result:
+                            parts.append("Result: [Chart generated successfully]")
+                    elif event.get("type") == "text" and event.get("content"):
+                        parts.append(event["content"])
+                if not parts and msg.get("content"):
+                    parts.append(msg["content"])
+                if parts:
+                    self.messages.append({"role": "assistant", "content": "\n".join(parts)})
 
     def get_history(self) -> list[dict[str, Any]]:
         """Get the current conversation history."""
