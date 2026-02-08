@@ -1,246 +1,141 @@
 # Dash
 
-Dash is a **self-learning data agent** that grounds its answers in **6 layers of context** and improves with every run.
+Dash is a **data agent** that delivers insights, not just SQL results. Ask questions in plain English, get analysis with charts and explanations.
 
-Inspired by [OpenAI's in-house data agent](https://openai.com/index/inside-our-in-house-data-agent/).
+Built with the Anthropic SDK and Claude — no framework dependencies.
 
 ## Quick Start
 
 ```sh
-# Clone this repo
-git clone https://github.com/agno-agi/dash.git && cd dash
-# Add OPENAI_API_KEY by adding to .env file or export OPENAI_API_KEY=sk-***
-cp example.env .env
+# Clone and setup
+git clone https://github.com/vibedatascience/dash_trial.git && cd dash_trial
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-# Start the application
-docker compose up -d --build
+# Add your Anthropic API key
+cp example.env .env  # then add ANTHROPIC_API_KEY=sk-ant-***
 
-# Load sample data and knowledge
-docker exec -it dash-api python -m dash.scripts.load_data
-docker exec -it dash-api python -m dash.scripts.load_knowledge
-```
-
-Confirm dash is running by navigation to [http://localhost:8000/docs](http://localhost:8000/docs).
-
-## Connect to the Web UI
-
-1. Open [os.agno.com](https://os.agno.com) and login
-2. Add OS → Local → `http://localhost:8000`
-3. Click "Connect"
-
-**Try it** (sample F1 dataset):
-
-- Who won the most F1 World Championships?
-- How many races has Lewis Hamilton won?
-- Compare Ferrari vs Mercedes points 2015-2020
-
-## Why Text-to-SQL Breaks in Practice
-
-Our goal is simple: ask a question in english, get a correct, meaningful answer. But raw LLMs writing SQL hit a wall fast:
-
-- **Schemas lack meaning.**
-- **Types are misleading.**
-- **Tribal knowledge is missing.**
-- **No way to learn from mistakes.**
-- **Results generally lack interpretation.**
-
-The root cause is missing context and missing memory.
-
-Dash solves this with **6 layers of grounded context**, a **self-learning loop** that improves with every query, and a focus on **understanding your question** to deliver insights you can act on.
-
-## The Six Layers of Context
-
-| Layer | Purpose | Source |
-|------|--------|--------|
-| **Table Usage** | Schema, columns, relationships | `knowledge/tables/*.json` |
-| **Human Annotations** | Metrics, definitions, and business rules | `knowledge/business/*.json` |
-| **Query Patterns** | SQL that is known to work | `knowledge/queries/*.sql` |
-| **Institutional Knowledge** | Docs, wikis, external references | MCP (optional) |
-| **Learnings** | Error patterns and discovered fixes | Agno `Learning Machine` |
-| **Runtime Context** | Live schema changes | `introspect_schema` tool |
-
-The agent retrieves relevant context at query time via hybrid search, then generates SQL grounded in patterns that already work.
-
-## The Self-Learning Loop
-
-Dash improves without retraining or fine-tuning. We call this gpu-poor continuous learning.
-
-It learns through two complementary systems:
-
-| System | Stores | How It Evolves |
-|------|--------|----------------|
-| **Knowledge** | Validated queries and business context | Curated by you + dash |
-| **Learnings** | Error patterns and fixes | Managed by `Learning Machine` automatically |
-
-```
-User Question
-     ↓
-Retrieve Knowledge + Learnings
-     ↓
-Reason about intent
-     ↓
-Generate grounded SQL
-     ↓
-Execute and interpret
-     ↓
- ┌────┴────┐
- ↓         ↓
-Success    Error
- ↓         ↓
- ↓         Diagnose → Fix → Save Learning
- ↓                           (never repeated)
- ↓
-Return insight
- ↓
-Optionally save as Knowledge
-```
-
-**Knowledge** is curated—validated queries and business context you want the agent to build on.
-
-**Learnings** is discovered—patterns the agent finds through trial and error. When a query fails because `position` is TEXT not INTEGER, the agent saves that gotcha. Next time, it knows.
-
-## Insights, Not Just Rows
-
-Dash reasons about what makes an answer useful, not just technically correct.
-
-**Question:**
-Who won the most races in 2019?
-
-| Typical SQL Agent | Dash |
-|------------------|------|
-| `Hamilton: 11` | Lewis Hamilton dominated 2019 with **11 wins out of 21 races**, more than double Bottas’s 4 wins. This performance secured his sixth world championship. |
-
-## Deploy to Railway
-
-```sh
-railway login
-
-./scripts/railway_up.sh
-```
-
-### Production Operations
-
-**Load data and knowledge:**
-```sh
-railway run python -m dash.scripts.load_data
-railway run python -m dash.scripts.load_knowledge
-```
-
-**View logs:**
-
-```sh
-railway logs --service dash
-```
-
-**Run commands in production:**
-
-```sh
-railway run python -m dash  # CLI mode
-```
-
-**Redeploy after changes:**
-
-```sh
-railway up --service dash -d
-```
-
-**Open dashboard:**
-```sh
-railway open
-```
-
-## Adding Knowledge
-
-Dash works best when it understands how your organization talks about data.
-
-```
-knowledge/
-├── tables/      # Table meaning and caveats
-├── queries/     # Proven SQL patterns
-└── business/    # Metrics and language
-```
-
-### Table Metadata
-
-```
-{
-  "table_name": "orders",
-  "table_description": "Customer orders with denormalized line items",
-  "use_cases": ["Revenue reporting", "Customer analytics"],
-  "data_quality_notes": [
-    "created_at is UTC",
-    "status values: pending, completed, refunded",
-    "amount stored in cents"
-  ]
-}
-```
-
-### Query Patterns
-
-```
--- <query name>monthly_revenue</query name>
--- <query description>
--- Monthly revenue calculation.
--- Converts cents to dollars.
--- Excludes refunded orders.
--- </query description>
--- <query>
-SELECT
-    DATE_TRUNC('month', created_at) AS month,
-    SUM(amount) / 100.0 AS revenue_dollars
-FROM orders
-WHERE status = 'completed'
-GROUP BY 1
-ORDER BY 1 DESC
--- </query>
-```
-
-### Business Rules
-
-```
-{
-  "metrics": [
-    {
-      "name": "MRR",
-      "definition": "Sum of active subscriptions excluding trials"
-    }
-  ],
-  "common_gotchas": [
-    {
-      "issue": "Revenue double counting",
-      "solution": "Filter to completed orders only"
-    }
-  ]
-}
-```
-
-### Load Knowledge
-
-```sh
-python -m dash.scripts.load_knowledge            # Upsert changes
-python -m dash.scripts.load_knowledge --recreate # Fresh start
-```
-
-## Local Development
-
-```sh
-./scripts/venv_setup.sh && source .venv/bin/activate
+# Start PostgreSQL
 docker compose up -d dash-db
+
+# Load sample data (F1 racing, 1950-2024)
 python -m dash.scripts.load_data
-python -m dash  # CLI mode
+
+# Run the API server
+python api_server.py
 ```
+
+The API runs at [http://localhost:8000](http://localhost:8000).
+
+## Frontend
+
+The frontend lives in a separate repo: [vibedatascience/dash-ui](https://github.com/vibedatascience/dash-ui)
+
+```sh
+cd ../dash-ui
+npm install && npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+## What It Can Do
+
+Dash isn't limited to SQL — it's a general-purpose data agent:
+
+- **Fetch data from URLs** — CSV, JSON, any public API
+- **Query the database** — pre-loaded F1 dataset or your own PostgreSQL
+- **Run Python or R** — pandas, numpy, matplotlib, tidyverse, ggplot2
+- **Create charts** — matplotlib, ggplot2, or interactive D3.js
+- **Scrape the web** — requests + pandas for web data
+
+**Try it:**
+- "Use yfinance to pull AMZN stock data and plot a 50-day moving average"
+- "Fetch the latest TidyTuesday dataset and find interesting patterns"
+- "Who won the most F1 championships? Show me a chart"
+- "Fetch GDP data from the World Bank API for G7 countries"
+
+## Architecture
+
+```
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────┐
+│   Next.js UI     │────▶│  FastAPI Server   │────▶│  DashAgent   │
+│  (dash-ui repo)  │◀────│  (api_server.py)  │◀────│  (Claude)    │
+│                  │ SSE │                   │     │              │
+└──────────────────┘     └──────────────────┘     └──────┬───────┘
+                                                         │
+                                  ┌──────────────────────┼──────────────┐
+                                  │                      │              │
+                            ┌─────▼─────┐  ┌─────────▼──────┐  ┌──▼───────┐
+                            │ PostgreSQL │  │ CodeInterpreter │  │ R Interp │
+                            │ (F1 data) │  │ (Python/pandas) │  │ (ggplot) │
+                            └───────────┘  └────────────────┘  └──────────┘
+```
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| `run_sql` | Execute PostgreSQL queries |
+| `run_code` | Execute Python with persistent state |
+| `run_code_and_get_chart` | Create matplotlib/D3 charts |
+| `run_r_code` | Execute R with persistent state |
+| `run_r_chart` | Create ggplot2 charts |
+| `list_variables` / `list_r_variables` | Inspect session state |
+
+### API Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/chat/stream` | POST | SSE streaming chat |
+| `/chat` | POST | Non-streaming chat |
+| `/clear` | POST | Reset session |
+| `/restore` | POST | Restore conversation history |
+| `/conversations` | GET/POST | List or create conversations |
+| `/conversations/{id}` | GET/PUT/DELETE | Manage a conversation |
+| `/conversations/{id}/messages` | POST | Save messages |
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENAI_API_KEY` | Yes | OpenAI API key |
-| `EXA_API_KEY` | No | Web search for external knowledge |
-| `DB_*` | No | Database config (defaults to localhost) |
+| `ANTHROPIC_API_KEY` | Yes | Claude API key |
+| `DB_HOST` | No | PostgreSQL host (default: localhost) |
+| `DB_PORT` | No | PostgreSQL port (default: 5432) |
+| `DB_USER` | No | PostgreSQL user (default: ai) |
+| `DB_PASS` | No | PostgreSQL password (default: ai) |
+| `DB_DATABASE` | No | Database name (default: ai) |
 
-## Further Reading
+## Database
 
-- [OpenAI's In-House Data Agent](https://openai.com/index/inside-our-in-house-data-agent/) — the inspiration
-- [Self-Improving SQL Agent](https://www.ashpreetbedi.com/articles/sql-agent) — deep dive on an earlier architecture
-- [Agno Docs](https://docs.agno.com)
-- [Discord](https://agno.com/discord)
+F1 racing data (1950-2024) is pre-loaded for demo purposes:
+
+| Table | Rows | Description |
+|-------|------|-------------|
+| `drivers_championship` | ~1400 | Championship standings by year |
+| `constructors_championship` | ~900 | Constructor standings by year |
+| `race_results` | ~25000 | Individual race results |
+| `race_wins` | ~1000 | Race winners |
+| `fastest_laps` | ~1000 | Fastest lap records |
+
+Conversations are stored in a `conversations` table (UUID, title, messages as JSONB).
+
+## Adding Your Own Data
+
+Point Dash at your own database by updating `DB_*` environment variables. Add context so the agent understands your schema:
+
+```
+dash/knowledge/
+├── tables/      # Table schemas and gotchas (JSON)
+├── queries/     # Validated SQL patterns
+└── business/    # Metrics and business rules
+```
+
+## Local Development
+
+```sh
+source .venv/bin/activate
+docker compose up -d dash-db
+python api_server.py          # API on :8000
+cd ../dash-ui && npm run dev  # UI on :3000
+python -m dash                # CLI mode (no frontend needed)
+```

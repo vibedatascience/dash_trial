@@ -116,50 +116,31 @@ sequenceDiagram
 
 ```
 dash-repo/
-├── api_server.py                 # FastAPI server - MAIN ENTRY POINT
-│                                 # Endpoints: /, /chat, /chat/stream, /clear
-│
+├── api_server.py                 # FastAPI server — MAIN ENTRY POINT
+│                                 # SSE streaming, conversations CRUD, session mgmt
 ├── dash/
 │   ├── __init__.py               # Exports: DashAgent, create_agent
 │   ├── __main__.py               # CLI: python -m dash
-│   ├── dash_agent.py             # Core agent
-│   │                             # - DashAgent class
-│   │                             # - CodeInterpreter class
-│   │                             # - TOOLS definitions
-│   │                             # - Event types (ToolCallStarted, etc.)
+│   ├── dash_agent.py             # Core agent — DashAgent, CodeInterpreter, TOOLS, events
 │   ├── r_interpreter.py          # R code execution (RInterpreter class)
 │   ├── paths.py                  # Path constants (KNOWLEDGE_DIR, etc.)
-│   │
 │   ├── context/                  # System prompt builders
-│   │   ├── semantic_model.py     # load_table_metadata(), format for prompt
-│   │   └── business_rules.py     # load_business_rules(), format for prompt
-│   │
+│   │   ├── semantic_model.py     # load_table_metadata()
+│   │   └── business_rules.py     # load_business_rules()
 │   ├── knowledge/                # Static knowledge (JSON/SQL files)
-│   │   ├── tables/               # Table schemas (5 JSON files)
-│   │   │   └── *.json            # {table_name, description, columns, gotchas}
-│   │   ├── business/             # Business context
-│   │   │   └── metrics.json      # {metrics, business_rules, common_gotchas}
-│   │   └── queries/              # Validated SQL patterns
-│   │       └── common_queries.sql
-│   │
+│   │   ├── tables/*.json         # Table schemas — {table_name, description, columns, gotchas}
+│   │   ├── business/metrics.json # Metrics, business rules, common gotchas
+│   │   └── queries/common_queries.sql
 │   └── scripts/
 │       └── load_data.py          # Downloads F1 CSVs → PostgreSQL
-│
 ├── db/
 │   ├── __init__.py               # Exports: db_url
 │   └── url.py                    # Builds PostgreSQL connection URL
-│
-├── compose.yaml                  # Docker: PostgreSQL + pgvector
+├── scripts/                      # Dev/deploy shell scripts
+├── compose.yaml                  # Docker: PostgreSQL
 ├── Dockerfile                    # Container build
 ├── pyproject.toml                # Python project config
 └── requirements.txt              # Dependencies
-
-../dash-ui/                       # Next.js frontend (separate directory)
-├── app/
-│   ├── page.js                   # Main chat UI (1000+ lines)
-│   ├── layout.js                 # Root layout
-│   └── globals.css               # Tailwind styles
-└── package.json
 ```
 
 ## Key Components
