@@ -198,20 +198,22 @@ class CodeInterpreter:
                 logger.warning(f"Could not create DB engine: {e}")
 
     def run_code(self, code: str) -> str:
-        """Execute Python code and return output."""
-        import sys
-        from io import StringIO
+        """Execute Python code and return output.
 
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        sys.stdout = StringIO()
-        sys.stderr = StringIO()
+        Uses contextlib.redirect_stdout/stderr instead of monkey-patching
+        sys.stdout globally, so concurrent sessions don't steal each other's output.
+        """
+        from io import StringIO
+        from contextlib import redirect_stdout, redirect_stderr
+
+        stdout_buf = StringIO()
+        stderr_buf = StringIO()
 
         try:
-            # Try exec first (for statements)
-            exec(code, self._globals)
-            output = sys.stdout.getvalue()
-            errors = sys.stderr.getvalue()
+            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+                exec(code, self._globals)
+            output = stdout_buf.getvalue()
+            errors = stderr_buf.getvalue()
 
             if errors:
                 return f"Output:\n{output}\n\nWarnings/Errors:\n{errors}"
@@ -220,8 +222,6 @@ class CodeInterpreter:
         except SyntaxError:
             # If it's a single expression, evaluate it
             try:
-                sys.stdout = old_stdout
-                sys.stderr = old_stderr
                 result = eval(code, self._globals)
                 if result is not None:
                     return str(result)
@@ -230,9 +230,6 @@ class CodeInterpreter:
                 return f"Error: {type(e).__name__}: {e}"
         except Exception as e:
             return f"Error: {type(e).__name__}: {e}"
-        finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
 
     def run_code_and_get_chart(self, code: str) -> str:
         """Execute code that creates a matplotlib chart, return base64 image."""

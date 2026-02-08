@@ -12,6 +12,7 @@ import sys
 import re
 import time
 import uuid
+import threading
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,7 +35,7 @@ from dash.dash_agent import (
 from db.url import db_url
 
 app = FastAPI(title="Dash API")
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=8)
 
 # Database engine for conversations
 db_engine = create_engine(db_url)
@@ -43,8 +44,9 @@ db_engine = create_engine(db_url)
 SESSION_EXPIRY_SECONDS = 30 * 60
 
 # Store agents by session_id for conversation persistence
-# Format: {session_id: {"agent": DashAgent, "last_access": timestamp}}
+# Format: {session_id: {"agent": DashAgent, "last_access": timestamp, "lock": threading.Lock()}}
 sessions: dict[str, dict] = {}
+sessions_dict_lock = threading.Lock()  # Protects creation/deletion of session entries
 
 
 def debug_log(msg):
@@ -70,26 +72,32 @@ def cleanup_expired_sessions():
         debug_log(f"Cleaned up {len(expired)} expired sessions")
 
 
-def get_agent(session_id: str | None) -> DashAgent:
-    """Get or create an agent for the session."""
+def get_session(session_id: str | None) -> dict:
+    """Get or create a session (agent + lock) for the session_id."""
     if session_id is None:
         session_id = "default"
 
-    # Clean up expired sessions periodically
-    cleanup_expired_sessions()
+    with sessions_dict_lock:
+        # Clean up expired sessions periodically
+        cleanup_expired_sessions()
 
-    now = time.time()
-    if session_id not in sessions:
-        debug_log(f"Creating new agent for session: {session_id}")
-        sessions[session_id] = {
-            "agent": DashAgent(db_url=db_url),
-            "last_access": now
-        }
-    else:
-        # Update last access time
-        sessions[session_id]["last_access"] = now
+        now = time.time()
+        if session_id not in sessions:
+            debug_log(f"Creating new agent for session: {session_id}")
+            sessions[session_id] = {
+                "agent": DashAgent(db_url=db_url),
+                "lock": threading.Lock(),
+                "last_access": now,
+            }
+        else:
+            sessions[session_id]["last_access"] = now
 
-    return sessions[session_id]["agent"]
+    return sessions[session_id]
+
+
+def get_agent(session_id: str | None) -> DashAgent:
+    """Get or create an agent for the session."""
+    return get_session(session_id)["agent"]
 
 
 # Enable CORS for frontend
@@ -258,11 +266,18 @@ async def root():
 def run_stream_sync(message: str, session_id: str = None, language: str = "python"):
     """Synchronous generator that yields events from Dash agent.
 
-    Converts our event objects to the same format the old Agno implementation used.
+    Uses a per-session lock to prevent concurrent requests from corrupting
+    agent state (messages list, interpreter globals, stdout).
     """
-    try:
-        agent = get_agent(session_id)
+    session = get_session(session_id)
+    agent = session["agent"]
+    lock = session["lock"]
 
+    if not lock.acquire(timeout=60):
+        yield {"type": "error", "error": "Session is busy with another request. Please wait."}
+        return
+
+    try:
         # Prepend language instruction to first message of session
         if language == "r":
             message = f"[USER PREFERS R] {message}"
@@ -309,6 +324,8 @@ def run_stream_sync(message: str, session_id: str = None, language: str = "pytho
         import traceback
         traceback.print_exc()
         yield {"type": "error", "error": str(e)}
+    finally:
+        lock.release()
 
 
 @app.post("/chat/stream")
@@ -396,8 +413,10 @@ async def clear_session(request: ChatRequest):
     """Clear conversation history for a session"""
     session_id = request.session_id or "default"
     if session_id in sessions:
-        sessions[session_id]["agent"].clear_history()
-        sessions[session_id]["last_access"] = time.time()
+        session = sessions[session_id]
+        with session["lock"]:
+            session["agent"].clear_history()
+            session["last_access"] = time.time()
         return {"status": "cleared", "session_id": session_id}
     return {"status": "no_session", "session_id": session_id}
 
@@ -406,9 +425,10 @@ async def clear_session(request: ChatRequest):
 async def restore_session(request: RestoreRequest):
     """Restore agent conversation history from saved frontend messages."""
     session_id = request.session_id or "default"
-    agent = get_agent(session_id)
-    agent.restore_history(request.messages)
-    return {"status": "restored", "session_id": session_id, "message_count": len(agent.messages)}
+    session = get_session(session_id)
+    with session["lock"]:
+        session["agent"].restore_history(request.messages)
+    return {"status": "restored", "session_id": session_id, "message_count": len(session["agent"].messages)}
 
 
 # ============================================================
