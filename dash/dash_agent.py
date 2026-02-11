@@ -176,8 +176,12 @@ class CodeInterpreter:
     """Execute Python code with persistent state (like Jupyter cells)."""
 
     def __init__(self, db_url: str | None = None):
+        import tempfile
         self._globals: dict[str, Any] = {}
         self._db_url = db_url
+
+        # Temp dir for any files the agent's code creates (charts, CSVs, etc.)
+        self._temp_dir = tempfile.mkdtemp(prefix="dash_py_")
 
         # Give access to Python builtins (enables import, print, len, etc.)
         import builtins
@@ -202,14 +206,18 @@ class CodeInterpreter:
 
         Uses contextlib.redirect_stdout/stderr instead of monkey-patching
         sys.stdout globally, so concurrent sessions don't steal each other's output.
+        Runs in a temp directory so any files created don't clutter the project.
         """
+        import os
         from io import StringIO
         from contextlib import redirect_stdout, redirect_stderr
 
         stdout_buf = StringIO()
         stderr_buf = StringIO()
+        prev_dir = os.getcwd()
 
         try:
+            os.chdir(self._temp_dir)
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
                 exec(code, self._globals)
             output = stdout_buf.getvalue()
@@ -230,17 +238,23 @@ class CodeInterpreter:
                 return f"Error: {type(e).__name__}: {e}"
         except Exception as e:
             return f"Error: {type(e).__name__}: {e}"
+        finally:
+            os.chdir(prev_dir)
 
     def run_code_and_get_chart(self, code: str) -> str:
         """Execute code that creates a matplotlib chart, return base64 image."""
+        import os
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
 
         # Make plt available in the execution context
         self._globals["plt"] = plt
+        prev_dir = os.getcwd()
 
         try:
+            os.chdir(self._temp_dir)
+
             # Clear any existing figures
             plt.clf()
             plt.close('all')
@@ -264,6 +278,8 @@ class CodeInterpreter:
         except Exception as e:
             plt.close('all')
             return f"Chart Error: {type(e).__name__}: {e}"
+        finally:
+            os.chdir(prev_dir)
 
     def list_variables(self) -> str:
         """List all user-defined variables in the current session."""
@@ -422,6 +438,42 @@ def build_system_prompt() -> str:
 
     return f"""You are Dash, an AI data analyst. Your job is to analyze data, create charts, and provide insights.
 
+## CRITICAL: Think First, Then Execute
+
+**Before touching any tool, ALWAYS do this:**
+
+1. **Break down the problem from first principles.** Restate what the user is asking in precise, granular terms. Decompose it into sub-questions.
+2. **State your assumptions explicitly.** What are you assuming about the data, the metric definitions, the time range, the filters, the grouping?
+3. **Ask the user to confirm before proceeding.** If there is ANY ambiguity — what column to use, how to define a metric, what time period, what filters to apply, how to handle nulls/edge cases — ASK. Do not guess. List your assumptions as bullet points and ask "Does this look right, or should I adjust anything?"
+4. **Only after the user confirms (or if the request is truly unambiguous), execute.**
+
+**Example:**
+User: "Show me the top performing drivers"
+You should respond:
+"Before I pull this, let me clarify a few things:
+- **'Top performing'** — are we measuring by total championship points, race wins, or podium finishes?
+- **Time range** — all time, or a specific era/decade?
+- **Top N** — top 5? top 10?
+
+Let me know and I'll run the analysis."
+
+Do NOT just run a query and hope it's what they meant.
+
+## CRITICAL: Insights Go in Your Response, NOT in Code
+
+**Your text response is the deliverable. Tool calls are just computation.**
+
+- Tools (run_code, run_sql, etc.) should do the number-crunching silently. Do NOT use `print()` to dump analysis, tables, or insights inside tool calls.
+- After tool calls complete, YOU write the insights, findings, and interpretation in your response text. That's what the user reads.
+- Bad: Tool call prints a giant table and your response says "See above."
+- Good: Tool call computes the data quietly, your response says "Hamilton leads with 7 titles, followed by Schumacher also with 7. Verstappen has closed the gap rapidly with 4 titles in the last 5 seasons..."
+
+**Structure your response like an analyst presenting findings:**
+- Lead with the key takeaway
+- Support with specific numbers and comparisons
+- Add context and interpretation
+- If there's a chart, explain what it shows and why it matters
+
 ## What You Do
 
 You help users with ANY data task:
@@ -471,6 +523,7 @@ User: "What tables are in the database?"
 - Variables persist across calls (like Jupyter)
 - ONE chart per response unless asked for more
 - Always explain insights, not just raw numbers
+- Keep tool call output minimal — no giant print() dumps. Compute in tools, narrate in your response.
 
 ## Chart Aesthetics (IMPORTANT)
 

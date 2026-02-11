@@ -25,6 +25,8 @@ from datetime import datetime
 # API keys should be set via environment variables
 # ANTHROPIC_API_KEY - for Claude model
 
+import anthropic
+
 from dash.dash_agent import (
     DashAgent,
     ToolCallStarted,
@@ -33,6 +35,9 @@ from dash.dash_agent import (
     StreamDone
 )
 from db.url import db_url
+
+# Lightweight client for title generation
+_title_client = anthropic.Anthropic()
 
 app = FastAPI(title="Dash API")
 executor = ThreadPoolExecutor(max_workers=8)
@@ -511,15 +516,28 @@ async def api_save_messages(conversation_id: str, request: ConversationUpdate):
         # Update messages
         update_conversation_messages(conversation_id, request.messages)
 
-        # Auto-generate title from first user message if not set
+        # Auto-generate title with Haiku after first user message
         if not conversation.get("title") and request.messages:
-            for msg in request.messages:
-                if msg.get("role") == "user":
-                    title = msg.get("content", "")[:50]
-                    if len(msg.get("content", "")) > 50:
-                        title += "..."
-                    update_conversation_title(conversation_id, title)
-                    break
+            first_user_msg = next((m.get("content", "") for m in request.messages if m.get("role") == "user"), None)
+            if first_user_msg:
+                # Fire and forget — don't block the response
+                def gen_title(conv_id, msg):
+                    try:
+                        resp = _title_client.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=20,
+                            messages=[{"role": "user", "content": f"Title this chat: {msg}"}],
+                            system="You are a title generator. Output 3-6 words, plain text only. No markdown, no bold, no asterisks, no quotes, no colons, no punctuation. Just the words. Examples: Stock Price Analysis for AMZN, F1 Championship Winners by Decade, TidyTuesday Water Access Data",
+                        )
+                        title = resp.content[0].text.strip().strip('"\'').replace('*', '').replace('#', '').replace(':', '')
+                        update_conversation_title(conv_id, title)
+                        debug_log(f"Generated title for {conv_id}: {title}")
+                    except Exception as e:
+                        debug_log(f"Title generation failed: {e}")
+                        # Fallback to truncation
+                        update_conversation_title(conv_id, msg[:50] + ("..." if len(msg) > 50 else ""))
+
+                threading.Thread(target=gen_title, args=(conversation_id, first_user_msg), daemon=True).start()
 
         return {"status": "saved", "id": conversation_id}
     except HTTPException:
