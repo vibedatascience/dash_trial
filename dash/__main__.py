@@ -1,7 +1,6 @@
 """CLI entry point: python -m dash"""
 
 from dash.dash_agent import DashAgent, TextDelta, ToolCallStarted, ToolCallCompleted, StreamDone
-from db.url import db_url
 
 
 def main():
@@ -9,7 +8,7 @@ def main():
     print("Dash - Data Agent")
     print("Type 'exit' or 'quit' to exit\n")
 
-    agent = DashAgent(db_url=db_url)
+    agent = DashAgent()
 
     while True:
         try:

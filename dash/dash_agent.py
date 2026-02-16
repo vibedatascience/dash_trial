@@ -17,9 +17,6 @@ from typing import Any, Generator, Literal
 
 import anthropic
 import pandas as pd
-from sqlalchemy import create_engine, text
-
-from dash.paths import TABLES_DIR, BUSINESS_DIR
 from dash.r_interpreter import RInterpreter, R_TOOLS
 
 # Configure logging
@@ -73,99 +70,6 @@ class StreamDone:
 # Context Builders (replacing Agno's context modules)
 # =============================================================================
 
-def load_table_metadata() -> list[dict[str, Any]]:
-    """Load table metadata from JSON files."""
-    tables: list[dict[str, Any]] = []
-    if not TABLES_DIR.exists():
-        return tables
-
-    for filepath in sorted(TABLES_DIR.glob("*.json")):
-        try:
-            with open(filepath) as f:
-                table = json.load(f)
-            tables.append({
-                "table_name": table["table_name"],
-                "description": table.get("table_description", ""),
-                "use_cases": table.get("use_cases", []),
-                "data_quality_notes": table.get("data_quality_notes", [])[:5],
-            })
-        except (json.JSONDecodeError, KeyError, OSError) as e:
-            logger.error(f"Failed to load {filepath}: {e}")
-    return tables
-
-
-def format_semantic_model() -> str:
-    """Format semantic model for system prompt."""
-    tables = load_table_metadata()
-    lines: list[str] = []
-
-    for table in tables:
-        lines.append(f"### {table['table_name']}")
-        if table.get("description"):
-            lines.append(table["description"])
-        if table.get("use_cases"):
-            lines.append(f"**Use cases:** {', '.join(table['use_cases'])}")
-        if table.get("data_quality_notes"):
-            lines.append("**Data quality:**")
-            for note in table["data_quality_notes"]:
-                lines.append(f"  - {note}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def load_business_rules() -> dict[str, list[Any]]:
-    """Load business definitions from JSON files."""
-    business: dict[str, list[Any]] = {"metrics": [], "business_rules": [], "common_gotchas": []}
-
-    if not BUSINESS_DIR.exists():
-        return business
-
-    for filepath in sorted(BUSINESS_DIR.glob("*.json")):
-        try:
-            with open(filepath) as f:
-                data = json.load(f)
-            for key in business:
-                if key in data:
-                    business[key].extend(data[key])
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error(f"Failed to load {filepath}: {e}")
-
-    return business
-
-
-def format_business_context() -> str:
-    """Build business context string for system prompt."""
-    business = load_business_rules()
-    lines: list[str] = []
-
-    if business["metrics"]:
-        lines.append("## METRICS\n")
-        for m in business["metrics"]:
-            lines.append(f"**{m.get('name', 'Unknown')}**: {m.get('definition', '')}")
-            if m.get("table"):
-                lines.append(f"  - Table: `{m['table']}`")
-            if m.get("calculation"):
-                lines.append(f"  - Calculation: {m['calculation']}")
-            lines.append("")
-
-    if business["business_rules"]:
-        lines.append("## BUSINESS RULES\n")
-        for rule in business["business_rules"]:
-            lines.append(f"- {rule}")
-        lines.append("")
-
-    if business["common_gotchas"]:
-        lines.append("## COMMON GOTCHAS\n")
-        for g in business["common_gotchas"]:
-            lines.append(f"**{g.get('issue', 'Unknown')}**")
-            if g.get("tables_affected"):
-                lines.append(f"  - Tables: {', '.join(g['tables_affected'])}")
-            if g.get("solution"):
-                lines.append(f"  - Solution: {g['solution']}")
-            lines.append("")
-
-    return "\n".join(lines)
 
 
 # =============================================================================
@@ -175,13 +79,13 @@ def format_business_context() -> str:
 class CodeInterpreter:
     """Execute Python code with persistent state (like Jupyter cells)."""
 
-    def __init__(self, db_url: str | None = None):
-        import tempfile
+    def __init__(self):
+        from dash.paths import CHARTS_DIR
         self._globals: dict[str, Any] = {}
-        self._db_url = db_url
 
-        # Temp dir for any files the agent's code creates (charts, CSVs, etc.)
-        self._temp_dir = tempfile.mkdtemp(prefix="dash_py_")
+        # Persistent dir for any files the agent's code creates (charts, CSVs, etc.)
+        CHARTS_DIR.mkdir(exist_ok=True)
+        self._temp_dir = str(CHARTS_DIR)
 
         # Give access to Python builtins (enables import, print, len, etc.)
         import builtins
@@ -190,16 +94,6 @@ class CodeInterpreter:
         # Pre-populate with common imports
         self._globals["pd"] = pd
         self._globals["np"] = __import__("numpy")
-
-        # Add database connection if available
-        if db_url:
-            try:
-                engine = create_engine(db_url)
-                self._globals["engine"] = engine
-                self._globals["run_sql"] = lambda q: pd.read_sql(q, engine)
-                self._globals["query_db"] = lambda q: pd.read_sql(q, engine)
-            except Exception as e:
-                logger.warning(f"Could not create DB engine: {e}")
 
     def run_code(self, code: str) -> str:
         """Execute Python code and return output.
@@ -286,7 +180,7 @@ class CodeInterpreter:
         user_vars = {
             k: type(v).__name__
             for k, v in self._globals.items()
-            if not k.startswith('_') and k not in ['pd', 'np', 'plt', 'engine', 'run_sql', 'query_db']
+            if not k.startswith('_') and k not in ['pd', 'np', 'plt']
         }
         if not user_vars:
             return "No user-defined variables in session."
@@ -299,38 +193,16 @@ class CodeInterpreter:
 
 TOOLS = [
     {
-        "name": "run_sql",
-        "description": """Execute a SQL query against the PostgreSQL database and return results.
-
-Use this tool to:
-- Query data from the available tables
-- Join tables to answer complex questions
-- Aggregate data for analysis
-
-The results will be returned as a formatted table. Always use LIMIT for large result sets.
-Available tables and their schemas are provided in the system prompt.""",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The SQL query to execute. Use PostgreSQL syntax."
-                }
-            },
-            "required": ["query"]
-        }
-    },
-    {
         "name": "run_code",
         "description": """Execute Python code for data analysis and manipulation.
 
 Use this tool to:
-- Process and transform data from SQL queries
+- Process and transform data (URLs, CSVs, APIs, user-pasted data)
 - Perform calculations and statistical analysis
 - Prepare data for visualization
 
 The execution environment persists between calls (like Jupyter cells).
-Pre-loaded: pandas as pd, numpy as np, query_db(sql) function.
+Pre-loaded: pandas as pd, numpy as np.
 
 IMPORTANT: Store results in variables to use in later code cells.""",
         "input_schema": {
@@ -338,7 +210,7 @@ IMPORTANT: Store results in variables to use in later code cells.""",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python code to execute. Use print() to show output."
+                    "description": "Python code to execute. Store results in variables — avoid print() for large outputs."
                 }
             },
             "required": ["code"]
@@ -351,11 +223,10 @@ IMPORTANT: Store results in variables to use in later code cells.""",
 Use this tool when you need to CREATE A CHART/VISUALIZATION.
 The chart will be styled with a dark theme automatically.
 
-Pre-loaded: matplotlib.pyplot as plt, pandas as pd, numpy as np, query_db(sql).
+Pre-loaded: matplotlib.pyplot as plt, pandas as pd, numpy as np.
 
 Example:
 ```python
-df = query_db("SELECT date, revenue FROM sales")
 plt.figure(figsize=(10, 6))
 plt.plot(df['date'], df['revenue'])
 plt.title('Revenue Over Time')
@@ -388,7 +259,7 @@ The chart is returned as a base64-encoded image.""",
         "name": "create_d3_chart",
         "description": """Create an interactive D3.js chart. ONLY use when user explicitly asks for D3 or interactive charts.
 
-First fetch data using run_sql or run_code and store in a variable (e.g., df).
+First fetch data using run_code and store in a variable (e.g., df).
 Then call this tool with D3.js code that uses the 'data' variable.
 
 The 'data' variable will be automatically injected as an array of objects.
@@ -433,10 +304,7 @@ svg.selectAll('circle').data(data).join('circle')
 
 def build_system_prompt() -> str:
     """Build the complete system prompt with context."""
-    semantic_model = format_semantic_model()
-    business_context = format_business_context()
-
-    return f"""You are Dash, an AI data analyst. Your job is to analyze data, create charts, and provide insights.
+    return """You are Dash, an AI data analyst. Your job is to analyze data, create charts, and provide insights.
 
 ## CRITICAL: Think First, Then Execute
 
@@ -448,31 +316,51 @@ def build_system_prompt() -> str:
 4. **Only after the user confirms (or if the request is truly unambiguous), execute.**
 
 **Example:**
-User: "Show me the top performing drivers"
+User: "Show me the top performing products"
 You should respond:
 "Before I pull this, let me clarify a few things:
-- **'Top performing'** — are we measuring by total championship points, race wins, or podium finishes?
-- **Time range** — all time, or a specific era/decade?
+- **'Top performing'** — are we measuring by revenue, units sold, or profit margin?
+- **Time range** — all time, last year, last quarter?
 - **Top N** — top 5? top 10?
 
 Let me know and I'll run the analysis."
 
 Do NOT just run a query and hope it's what they meant.
 
-## CRITICAL: Insights Go in Your Response, NOT in Code
+## CRITICAL: Narrate Before Every Tool Call
 
-**Your text response is the deliverable. Tool calls are just computation.**
+**Before every tool call, write a brief explanation of what you're about to do and why.** The user should always understand your reasoning and approach before seeing tool execution. Think out loud — explain your logic from first principles.
 
-- Tools (run_code, run_sql, etc.) should do the number-crunching silently. Do NOT use `print()` to dump analysis, tables, or insights inside tool calls.
-- After tool calls complete, YOU write the insights, findings, and interpretation in your response text. That's what the user reads.
-- Bad: Tool call prints a giant table and your response says "See above."
-- Good: Tool call computes the data quietly, your response says "Hamilton leads with 7 titles, followed by Schumacher also with 7. Verstappen has closed the gap rapidly with 4 titles in the last 5 seasons..."
+**Examples:**
+- "The dataset has 50k rows across 15 years, so I'll start by checking the shape and column types to understand what we're working with."
+- "Since you want year-over-year growth, I need to calculate the percentage change between consecutive years. I'll group by year first, sum the revenue, then use pct_change()."
+- "To find the outliers, I'll compute the IQR and flag anything beyond 1.5x the interquartile range — this is more robust than just using standard deviations since your data looks skewed."
 
-**Structure your response like an analyst presenting findings:**
-- Lead with the key takeaway
-- Support with specific numbers and comparisons
-- Add context and interpretation
-- If there's a chart, explain what it shows and why it matters
+**Never silently fire off a tool call.** Always give the user context first, even if it's one sentence.
+
+## CRITICAL: Your Text Response IS the Deliverable
+
+**The user reads YOUR response text, not tool call output. Tool calls are invisible computation — your written response is the only thing that matters.**
+
+**Rules:**
+1. Do NOT use `print()` to dump tables, summaries, or analysis in tool calls. The user cannot easily read tool output — it's collapsed, truncated, and hard to parse.
+2. Store results in variables. Use tool calls purely to compute, transform, and prepare data.
+3. After ALL tool calls finish, YOU write a thorough, detailed response explaining everything you found. This is your main job.
+4. NEVER say "See above", "As shown in the output", or "The results show" without actually restating the findings in your response text.
+
+**Your response MUST include:**
+- The key takeaway up front
+- Specific numbers, rankings, comparisons — everything the user needs to understand the data WITHOUT looking at tool output
+- Context and interpretation (why does this matter? what's surprising?)
+- If there's a chart, explain what it shows and what patterns are visible
+
+**Bad example:**
+- Tool call: `print(df.describe())` ... `print(df.head(20))` ... `print(top_10)`
+- Response: "Here's what I found in the data above."
+
+**Good example:**
+- Tool call: `summary = df.describe()` ... `top_10 = df.nlargest(10, 'revenue')`
+- Response: "The US leads with $4.2B in revenue, nearly double the UK at $2.1B. Germany rounds out the top 3 at $1.8B. Interestingly, the top 3 markets account for 68% of total revenue, while the remaining 12 markets split the rest fairly evenly..."
 
 ## What You Do
 
@@ -483,28 +371,31 @@ You help users with ANY data task:
 - Run statistical analysis
 - Answer questions about data
 
-**Do whatever the user asks.** Don't assume they want SQL — most users will give you URLs, paste data, or ask general questions.
+**Do whatever the user asks.** Most users will give you URLs, paste data, or ask general questions.
 
 ## Data Sources (in order of likelihood)
 
 1. **URLs** - User gives you a CSV/JSON URL → use `pd.read_csv(url)` or `pd.read_json(url)`
 2. **Pasted data** - User pastes text/CSV → parse it with pandas
 3. **Web scraping** - User wants data from a webpage → use requests + pandas
-4. **Pre-loaded PostgreSQL** - ONLY if user explicitly asks about "the database" or "tables" (F1 racing data is loaded for demo)
+4. **Pre-loaded variables** - Kaggle/TidyTuesday datasets may already be loaded as DataFrames — use `list_variables` to check
 
 ## Tools
 
 ### Python (default):
 - `run_code` - Execute Python. Pre-loaded: pandas, numpy, requests
 - `run_code_and_get_chart` - Create matplotlib charts
-- `run_sql` - Query PostgreSQL (ONLY when user asks for database/tables)
 - `list_variables` - See what's in memory
 
 ### R (when user prefers R or asks for tidyverse/ggplot2):
 - `run_r_code` - Execute R code. Pre-loaded: **tidyverse** (dplyr, tidyr, readr, ggplot2)
-- `run_r_chart` - Create ggplot2 visualizations (dark theme auto-applied)
+- `run_r_chart` - Create ggplot2 visualizations 
 - Use tidyverse idioms: pipes (`%>%`), `mutate()`, `filter()`, `group_by()`, `summarize()`
 - For charts: always use ggplot2 with `aes()`, `geom_*()`, proper labels
+
+### Web (built-in, server-side):
+- `web_search` - Search the web for real-time information, current events, latest data. Use when you need up-to-date info beyond your training data.
+- `web_fetch` - Fetch full content from a URL (web page or PDF). Use to read documentation, articles, datasets, or any URL the user provides or that you found via web_search. Only works with URLs that appeared in the conversation.
 
 ## Examples
 
@@ -514,16 +405,13 @@ User: "Analyze this CSV: https://example.com/data.csv"
 User: "Here's my sales data: [pastes CSV]"
 → Parse it with `pd.read_csv(io.StringIO('''...'''))`
 
-User: "What tables are in the database?"
-→ NOW use `run_sql` to query the PostgreSQL
-
 ## Guidelines
 
 - **Never use emojis**
 - Variables persist across calls (like Jupyter)
 - ONE chart per response unless asked for more
 - Always explain insights, not just raw numbers
-- Keep tool call output minimal — no giant print() dumps. Compute in tools, narrate in your response.
+- Compute in tools, narrate in your response. The user reads your text, not tool output.
 
 ## Chart Aesthetics (IMPORTANT)
 
@@ -552,12 +440,7 @@ User: "What tables are in the database?"
 - R/ggplot2: Use `theme(panel.background = element_rect(fill = 'white'))`
 - Only deviate from white background when thematically appropriate
 
----
-
-## DATABASE SCHEMA (only use if user asks about "database" or "tables")
-
-{semantic_model}
-{business_context}"""
+"""
 
 
 # =============================================================================
@@ -574,7 +457,6 @@ class DashAgent:
 
     def __init__(
         self,
-        db_url: str | None = None,
         model: str = "claude-opus-4-6",
         max_tokens: int = 16384,  # Opus 4 supports up to 64K output
     ):
@@ -583,38 +465,53 @@ class DashAgent:
         self.max_tokens = max_tokens
         self.system_prompt = build_system_prompt()
 
-        # Initialize code interpreters with DB connection
-        self.interpreter = CodeInterpreter(db_url)
-        self.r_interpreter = RInterpreter(db_url)
+        # Initialize code interpreters
+        self.interpreter = CodeInterpreter()
+        self.r_interpreter = RInterpreter()
 
-        # Combined tools list (Python + R)
-        self._tools = TOOLS + R_TOOLS
+        # Combined tools list (Python + R + server tools)
+        self._tools = TOOLS + R_TOOLS + [
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+            {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5},
+        ]
 
         # Conversation history: list of {"role": "user"|"assistant", "content": ...}
         self.messages: list[dict[str, Any]] = []
 
-        # Database connection for direct SQL
-        self._db_url = db_url
-        self._engine = None
-        if db_url:
-            try:
-                self._engine = create_engine(db_url)
-            except Exception as e:
-                logger.warning(f"Could not create DB engine: {e}")
+    @staticmethod
+    def _summarize_server_tool_result(block) -> str:
+        """Extract a human-readable summary from a server tool result block."""
+        content = getattr(block, 'content', None)
+        if content is None:
+            return "(no results)"
+
+        # web_search_tool_result: content is a list of web_search_result objects
+        if isinstance(content, list):
+            titles = []
+            for item in content:
+                item_type = getattr(item, 'type', '')
+                if item_type == 'web_search_result':
+                    title = getattr(item, 'title', '')
+                    url = getattr(item, 'url', '')
+                    titles.append(f"{title}\n{url}" if title else url)
+                elif item_type == 'web_search_tool_result_error':
+                    return f"Search error: {getattr(item, 'error_code', 'unknown')}"
+            return "\n\n".join(titles) if titles else "(no results)"
+
+        # web_fetch_tool_result: content has a nested structure
+        content_type = getattr(content, 'type', '')
+        if content_type == 'web_fetch_tool_error':
+            return f"Fetch error: {getattr(content, 'error_code', 'unknown')}"
+        if content_type == 'web_fetch_result':
+            url = getattr(content, 'url', '')
+            return f"Fetched: {url}"
+
+        return str(content)[:500]
 
     def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """Execute a tool and return the result."""
         try:
-            if tool_name == "run_sql":
-                query = tool_input.get("query", "")
-                if not self._engine:
-                    return "Error: No database connection available"
-                df = pd.read_sql(query, self._engine)
-                # Store in interpreter for later use
-                self.interpreter._globals["_last_query_result"] = df
-                return df.to_string(max_rows=50, max_cols=20)
-
-            elif tool_name == "run_code":
+            if tool_name == "run_code":
                 code = tool_input.get("code", "")
                 return self.interpreter.run_code(code)
 
@@ -695,6 +592,7 @@ class DashAgent:
                 system=self.system_prompt,
                 tools=self._tools,
                 messages=self.messages,
+                extra_headers={"anthropic-beta": "web-fetch-2025-09-10"},
             ) as stream_response:
                 # Stream content as it arrives
                 for event in stream_response:
@@ -708,7 +606,9 @@ class DashAgent:
                         elif event.type == 'content_block_start':
                             if hasattr(event, 'content_block'):
                                 block = event.content_block
-                                if hasattr(block, 'type') and block.type == 'tool_use':
+                                block_type = getattr(block, 'type', '')
+
+                                if block_type == 'tool_use':
                                     # Tool use is starting! Emit event immediately
                                     tool_name = getattr(block, 'name', 'unknown')
                                     yield ToolCallStarted(
@@ -720,6 +620,24 @@ class DashAgent:
                                         'name': tool_name,
                                         'id': getattr(block, 'id', ''),
                                     }
+
+                                elif block_type == 'server_tool_use':
+                                    # Server tool (web_search, web_fetch) starting
+                                    tool_name = getattr(block, 'name', 'unknown')
+                                    yield ToolCallStarted(
+                                        tool_name=tool_name,
+                                        tool_args={}
+                                    )
+
+                                elif block_type in ('web_search_tool_result', 'web_fetch_tool_result'):
+                                    # Server tool completed — extract result summary
+                                    result_text = self._summarize_server_tool_result(block)
+                                    tool_name = 'web_search' if 'search' in block_type else 'web_fetch'
+                                    yield ToolCallCompleted(
+                                        tool_name=tool_name,
+                                        tool_args={},
+                                        result=result_text
+                                    )
 
                 # Get the final message
                 final_message = stream_response.get_final_message()
@@ -837,6 +755,8 @@ class DashAgent:
                             parts.append(f"Result: {truncated}")
                         elif "[CHART_BASE64]" in result:
                             parts.append("Result: [Chart generated successfully]")
+                    elif event.get("type") == "context" and event.get("content"):
+                        parts.append(f"[{event.get('title', 'Context')}]:\n{event['content']}")
                     elif event.get("type") == "text" and event.get("content"):
                         parts.append(event["content"])
                 if not parts and msg.get("content"):
@@ -853,9 +773,9 @@ class DashAgent:
 # Convenience function
 # =============================================================================
 
-def create_agent(db_url: str | None = None) -> DashAgent:
+def create_agent() -> DashAgent:
     """Create a new DashAgent instance."""
-    return DashAgent(db_url=db_url)
+    return DashAgent()
 
 
 # =============================================================================
@@ -863,14 +783,12 @@ def create_agent(db_url: str | None = None) -> DashAgent:
 # =============================================================================
 
 if __name__ == "__main__":
-    from db.url import db_url
-
-    agent = create_agent(db_url)
+    agent = create_agent()
 
     print("Testing agent with events...")
     print("-" * 50)
 
-    for event in agent.run("How many rows are in the drivers_championship table?"):
+    for event in agent.run("What's 2 + 2? Use run_code to compute it."):
         if isinstance(event, TextDelta):
             print(event.content, end="", flush=True)
         elif isinstance(event, ToolCallStarted):

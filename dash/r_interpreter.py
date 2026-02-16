@@ -20,13 +20,14 @@ logger = logging.getLogger(__name__)
 class RInterpreter:
     """Execute R code with persistent state across calls."""
 
-    def __init__(self, db_url: str | None = None):
-        self._db_url = db_url
-        self._temp_dir = tempfile.mkdtemp(prefix="dash_r_")
+    def __init__(self):
+        from dash.paths import CHARTS_DIR
+        CHARTS_DIR.mkdir(exist_ok=True)
+        self._temp_dir = str(CHARTS_DIR)
         self._state_file = os.path.join(self._temp_dir, "state.RData")
         self._initialized = False
 
-        # Initialize R environment with DB connection and common packages
+        # Initialize R environment with common packages
         self._init_r_env()
 
     def _init_r_env(self):
@@ -48,36 +49,6 @@ suppressPackageStartupMessages({
 # Use minimal theme as default — agent controls all styling via prompt
 theme_set(theme_minimal())
 """
-
-        # Add DB connection to preamble
-        if self._db_url:
-            try:
-                from urllib.parse import urlparse
-                parsed = urlparse(self._db_url)
-                preamble += f"""
-# Database connection (re-established each call since handles don't serialize)
-tryCatch({{
-    suppressPackageStartupMessages({{
-        library(DBI)
-        library(RPostgres)
-    }})
-    db_con <<- dbConnect(
-        RPostgres::Postgres(),
-        host = "{parsed.hostname or 'localhost'}",
-        port = {parsed.port or 5432},
-        dbname = "{parsed.path.lstrip('/') if parsed.path else 'ai'}",
-        user = "{parsed.username or 'ai'}",
-        password = "{parsed.password or 'ai'}"
-    )
-    query_db <<- function(sql) dbGetQuery(db_con, sql)
-    run_sql <<- query_db
-}}, error = function(e) {{
-    query_db <<- function(sql) stop("Database not available. Use Python's run_sql tool instead.")
-    run_sql <<- query_db
-}})
-"""
-            except Exception as e:
-                logger.warning(f"Could not set up R DB connection: {e}")
 
         # Write preamble to a file that gets sourced each call
         self._preamble_file = os.path.join(self._temp_dir, "preamble.R")
@@ -268,12 +239,15 @@ if (!exists("{var_name}")) {{
             return None
 
     def cleanup(self):
-        """Clean up temporary files."""
-        import shutil
+        """Clean up R state files (but keep the charts directory)."""
         try:
-            shutil.rmtree(self._temp_dir)
+            if os.path.exists(self._state_file):
+                os.remove(self._state_file)
+            preamble = getattr(self, '_preamble_file', None)
+            if preamble and os.path.exists(preamble):
+                os.remove(preamble)
         except Exception as e:
-            logger.warning(f"Could not clean up R temp dir: {e}")
+            logger.warning(f"Could not clean up R state files: {e}")
 
 
 # Tool definitions for R
@@ -285,16 +259,15 @@ R_TOOLS = [
 Use this tool when the user prefers R or asks for R-specific analysis.
 
 The execution environment persists between calls (variables are saved).
-Pre-loaded packages: dplyr, ggplot2, tidyr, DBI, RPostgres
-Pre-loaded functions: query_db(sql), run_sql(sql) - query the database
+Pre-loaded packages: dplyr, ggplot2, tidyr, readr, stringr, purrr
 
 Example:
 ```r
-df <- query_db("SELECT * FROM drivers_championship WHERE year = 2020")
+df <- read_csv("https://example.com/data.csv")
 df %>%
-    group_by(team) %>%
-    summarize(total_points = sum(points)) %>%
-    arrange(desc(total_points))
+    group_by(category) %>%
+    summarize(total = sum(value)) %>%
+    arrange(desc(total))
 ```
 
 IMPORTANT: Store results in variables to use in later code cells.""",
@@ -316,15 +289,14 @@ IMPORTANT: Store results in variables to use in later code cells.""",
 Use this tool when user wants R/ggplot2 charts.
 A dark theme is applied automatically.
 
-Pre-loaded: ggplot2, dplyr, tidyr, query_db(sql)
+Pre-loaded: ggplot2, dplyr, tidyr, readr
 
 Example:
 ```r
-df <- query_db("SELECT year, points FROM drivers_championship WHERE name = 'Lewis Hamilton'")
-ggplot(df, aes(x = year, y = points)) +
+ggplot(df, aes(x = year, y = value)) +
     geom_line(color = "#f97316", size = 1.2) +
     geom_point(color = "#f97316", size = 3) +
-    labs(title = "Hamilton's Championship Points", x = "Year", y = "Points")
+    labs(title = "Trend Over Time", x = "Year", y = "Value")
 ```
 
 The chart is returned as a base64-encoded image.""",
